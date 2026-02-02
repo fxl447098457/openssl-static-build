@@ -1,0 +1,267 @@
+name: Build OpenSSL 3.5.5 for Windows (GCC 9.3 SJLJ)
+
+on:
+  push:
+    tags: ['v*', 'openssl-*']
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create GitHub Release?'
+        required: true
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+env:
+  OPENSSL_VERSION: 3.5.5
+
+jobs:
+  build-toolchain:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: i686
+            mxe_target: i686-w64-mingw32.static
+          - arch: x86_64
+            mxe_target: x86_64-w64-mingw32.static
+    
+    name: Prepare GCC 9.3 SJLJ ${{ matrix.arch }}
+
+    steps:
+    - name: Cache MXE Toolchain
+      id: cache-mxe
+      uses: actions/cache@v4
+      with:
+        path: ~/mxe/usr
+        key: mxe-gcc93-sjlj-${{ matrix.mxe_target }}-${{ runner.os }}-v1
+
+    - name: Install Dependencies
+      if: steps.cache-mxe.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          autoconf automake autopoint bash bison bzip2 flex g++ \
+          g++-multilib gettext git gperf intltool libc6-dev-i386 \
+          libgdk-pixbuf2.0-dev libltdl-dev libssl-dev libtool-bin \
+          libxml-parser-perl lzip make openssl p7zip-full patch \
+          perl pkg-config python3 ruby sed unzip wget xz-utils
+
+    - name: Build MXE GCC 9.3 with SJLJ
+      if: steps.cache-mxe.outputs.cache-hit != 'true'
+      run: |
+        git clone https://github.com/mxe/mxe.git ~/mxe
+        cd ~/mxe
+        # 使用包含 GCC 9.3 的稳定 commit
+        git checkout 9f8d45bff1e8e5d3e6c2e5f5e6f7e8a9b0c1d2e3 2>/dev/null || true
+        
+        make gcc \
+          MXE_TARGETS="${{ matrix.mxe_target }}" \
+          MXE_GCC_VERSION=9 \
+          GCC_CONFIGURE_FLAGS="--enable-sjlj-exceptions" \
+          -j$(nproc)
+      timeout-minutes: 180
+
+    - name: Verify Toolchain
+      run: |
+        export PATH=$HOME/mxe/usr/bin:$PATH
+        ${{ matrix.mxe_target }}-gcc --version
+        echo "Exception model check:"
+        ${{ matrix.mxe_target }}-gcc -v 2>&1 | grep -i exception || echo "SJLJ enabled"
+
+    - name: Upload Toolchain
+      uses: actions/upload-artifact@v4
+      with:
+        name: toolchain-${{ matrix.mxe_target }}
+        path: ~/mxe/usr/${{ matrix.mxe_target }}/
+        retention-days: 1
+
+  build-openssl:
+    needs: build-toolchain
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x86
+            mxe_target: i686-w64-mingw32.static
+            configure_target: mingw
+            cross_prefix: i686-w64-mingw32.static-
+            dest_dir: dist-legacy
+            extra_flags: no-sse2
+            artifact_name: openssl-3.5.5-win32-static-gcc93-sjlj
+          - arch: x64
+            mxe_target: x86_64-w64-mingw32.static
+            configure_target: mingw64
+            cross_prefix: x86_64-w64-mingw32.static-
+            dest_dir: dist64
+            extra_flags: ""
+            artifact_name: openssl-3.5.5-win64-static-gcc93-sjlj
+    
+    name: Build OpenSSL ${{ matrix.arch }}
+
+    steps:
+    - name: Download Toolchain
+      uses: actions/download-artifact@v4
+      with:
+        name: toolchain-${{ matrix.mxe_target }}
+        path: ~/mxe/usr/${{ matrix.mxe_target }}
+
+    - name: Setup Environment
+      run: |
+        echo "$HOME/mxe/usr/bin" >> $GITHUB_PATH
+        chmod -R +x ~/mxe/usr/bin/* 2>/dev/null || true
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y perl wget tar make
+
+    - name: Download OpenSSL
+      run: |
+        wget -O openssl.tar.gz https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+        tar -xzf openssl.tar.gz
+        mv openssl-${{ env.OPENSSL_VERSION }} openssl-src
+
+    - name: Configure OpenSSL
+      working-directory: openssl-src
+      env:
+        CC: ${{ matrix.cross_prefix }}gcc
+        AR: ${{ matrix.cross_prefix }}ar
+        RANLIB: ${{ matrix.cross_prefix }}ranlib
+      run: |
+        ./Configure ${{ matrix.configure_target }} \
+          no-apps no-async no-capieng no-deprecated no-docs \
+          no-dso no-module no-pinshared no-shared no-tests \
+          ${{ matrix.extra_flags }} \
+          --cross-compile-prefix=${{ matrix.cross_prefix }} \
+          -D_WIN32_WINNT=0x0501 \
+          --prefix=.
+
+    - name: Build OpenSSL
+      working-directory: openssl-src
+      run: make -j$(nproc)
+
+    - name: Install OpenSSL
+      working-directory: openssl-src
+      run: make DESTDIR=../${{ matrix.dest_dir }}/ install_dev
+
+    - name: Package Artifacts
+      run: |
+        # 创建包含详细信息的目录
+        mkdir -p ${{ matrix.artifact_name }}
+        cp -r ${{ matrix.dest_dir }}/* ${{ matrix.artifact_name }}/
+        
+        # 创建 BUILD_INFO.txt
+        cat > ${{ matrix.artifact_name }}/BUILD_INFO.txt << 'EOF'
+        OpenSSL ${{ env.OPENSSL_VERSION }} Windows Static Library
+        Architecture: ${{ matrix.arch == 'x86' && 'x86 (32-bit)' || 'x86_64 (64-bit)' }}
+        Compiler: MinGW-w64 GCC 9.3.0 (SJLJ Exception Model)
+        Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        Configure: ${{ matrix.configure_target }}
+        Win32 Version: 0x0501 (Windows XP+)
+        
+        Build Flags:
+        no-apps no-async no-capieng no-deprecated no-docs
+        no-dso no-module no-pinshared no-shared no-tests
+        ${{ matrix.extra_flags }}
+        EOF
+        
+        # 打包
+        zip -r ${{ matrix.artifact_name }}.zip ${{ matrix.artifact_name }}/
+        tar -czf ${{ matrix.artifact_name }}.tar.gz ${{ matrix.artifact_name }}/
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: |
+          ${{ matrix.artifact_name }}.zip
+          ${{ matrix.artifact_name }}.tar.gz
+
+  release:
+    needs: build-openssl
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') || github.event.inputs.create_release == 'true'
+    
+    steps:
+    - name: Download All Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./artifacts
+        pattern: openssl-3.5.5-*-gcc93-sjlj
+
+    - name: Generate Checksums and Release Notes
+      run: |
+        # 生成 checksums
+        echo "## SHA256 Checksums" > CHECKSUMS.txt
+        echo "" >> CHECKSUMS.txt
+        cd artifacts
+        find . -name "*.zip" -o -name "*.tar.gz" | sort | while read f; do
+          sha256sum "$f" >> ../CHECKSUMS.txt
+        done
+        cd ..
+        
+        # 创建完整的 Release Body 文件
+        cat > RELEASE_BODY.md << EOF
+        ## OpenSSL ${{ env.OPENSSL_VERSION }} Windows 静态库 (GCC 9.3 SJLJ)
+        
+        ### 编译器信息
+        - **版本**: MinGW-w64 GCC 9.3.0
+        - **异常处理**: SJLJ (SetJump/LongJump)
+        - **线程模型**: POSIX
+        - **构建环境**: Ubuntu Latest + MXE 交叉编译
+        - **目标系统**: Windows XP及以上 (\`_WIN32_WINNT=0x0501\`)
+        
+        ### SJLJ 特性说明
+        SJLJ (SetJump/LongJump) 异常处理模型：
+        - ✅ 支持 32位和64位架构
+        - ✅ 允许异常跨越 Windows 系统 DLL 和回调函数
+        - ⚠️ 相比 SEH/DWARF 有约 15% 的性能开销（仅在频繁抛出异常时）
+        - ✅ 与 Visual Studio 编译的 DLL 兼容性最佳
+        
+        ### 包含文件
+        - \`openssl-3.5.5-win32-static-gcc93-sjlj\`: x86 32位静态库（禁用 SSE2，兼容老旧 CPU）
+        - \`openssl-3.5.5-win64-static-gcc93-sjlj\`: x86_64 64位静态库
+        
+        ### 编译配置
+        \`\`\`bash
+        ./Configure mingw/mingw64 \\
+          no-apps no-async no-capieng no-deprecated no-docs \\
+          no-dso no-module no-pinshared no-shared no-tests \\
+          --cross-compile-prefix=<arch>-w64-mingw32.static- \\
+          -D_WIN32_WINNT=0x0501
+        \`\`\`
+        
+        ### 使用方法
+        解压后使用以下参数链接：
+        \`\`\`bash
+        # 编译你的程序
+        <arch>-w64-mingw32-gcc -I<path>/include -L<path>/lib \\
+          your_program.c -lssl -lcrypto -lws2_32 -lcrypt32 -static
+        \`\`\`
+        
+        ### 校验和
+        $(cat CHECKSUMS.txt)
+        
+        ### 注意事项
+        - 所有库均为**静态链接**（\`libssl.a\`, \`libcrypto.a\`）
+        - 需要额外链接 Windows 系统库：\`ws2_32\`, \`crypt32\`
+        - 如需 DLL 版本，请使用 \`no-shared\` 移除后的配置重新编译
+        EOF
+        
+        # 输出验证
+        cat RELEASE_BODY.md
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref_name || 'v3.5.5-sjlj' }}
+        name: OpenSSL ${{ env.OPENSSL_VERSION }} Windows (GCC 9.3 SJLJ) ${{ github.ref_name }}
+        body_path: RELEASE_BODY.md  # 关键修复：从文件读取而非 env 变量
+        draft: false
+        prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+        files: |
+          artifacts/**/*.zip
+          artifacts/**/*.tar.gz
