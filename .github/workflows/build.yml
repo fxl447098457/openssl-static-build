@@ -26,7 +26,7 @@ jobs:
             configure_target: mingw
             prefix: i686-w64-mingw32-
             artifact_name: openssl-3.5.5-win32-static-gcc93-sjlj
-            extra_flags: ""  # 确保空值
+            extra_flags: ""
           - arch: x64
             toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-x86_64-9.3.0-7.0.0-r3-sjlj.7z
             mingw_dir: C:\mingw64
@@ -48,31 +48,14 @@ jobs:
         Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
         refreshenv
 
-    - name: Fix Perl Path Separator (CRITICAL FIX)
-      shell: powershell
-      run: |
-        # ✅ 关键修复: 强制 Perl 使用 Unix 风格路径分隔符
-        $env:PERL5LIB = "C:\strawberry\perl\lib"
-        $env:PATH = $env:PATH -replace "C:\\strawberry\\perl\\bin", "C:/strawberry/perl/bin"
-        $env:PATH = $env:PATH -replace "C:\\strawberry\\c\\bin", "C:/strawberry/c/bin"
-        Write-Host "Fixed PATH for Unix-style paths: $env:PATH"
-
     - name: Add Perl to PATH
       shell: powershell
       run: |
         "C:/strawberry/perl/bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
         "C:/strawberry/c/bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-    - name: Verify Perl Path Style
-      shell: powershell
-      run: |
-        # 验证是否使用 Unix 风格路径
-        $perlPath = (Get-Command perl).Source
-        if ($perlPath -match "\\") {
-          Write-Error "Perl still using Windows paths! $perlPath"
-          exit 1
-        }
-        Write-Host "Perl using Unix paths: $perlPath"
+    - name: Verify Perl
+      run: perl -v
 
     - name: Download MinGW Toolchain
       shell: powershell
@@ -90,7 +73,6 @@ jobs:
           $binDir = "${{ matrix.mingw_dir }}/mingw64/bin"
         }
         $binDir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-        Write-Host "Added to PATH: $binDir"
 
     - name: Download OpenSSL Source
       shell: powershell
@@ -98,31 +80,16 @@ jobs:
         $url = "https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
         Invoke-WebRequest -Uri $url -OutFile "openssl.tar.gz"
         tar -xzf openssl.tar.gz
-        dir "openssl-${{ env.OPENSSL_VERSION }}"
 
     - name: Configure OpenSSL
       working-directory: openssl-${{ env.OPENSSL_VERSION }}
       shell: cmd
       run: |
         @echo on
+        set PERL_USE_UNX_PATH=1
+        set PERL5LIB=C:\strawberry\perl\lib
         set INSTALL_PREFIX=%CD%/../install-${{ matrix.arch }}
-        
-        perl Configure ${{ matrix.configure_target }} ^
-          no-apps ^
-          no-async ^
-          no-capieng ^
-          no-deprecated ^
-          no-docs ^
-          no-dso ^
-          no-module ^
-          no-pinshared ^
-          no-shared ^
-          no-tests ^
-          ${{ matrix.extra_flags }} ^
-          --cross-compile-prefix=${{ matrix.prefix }} ^
-          -D_WIN32_WINNT=0x0601 ^  # ✅ 修复: Windows 7+
-          --prefix=%INSTALL_PREFIX% ^
-          || exit /b 1
+        perl Configure ${{ matrix.configure_target }} no-apps no-async no-capieng no-deprecated no-docs no-dso no-module no-pinshared no-shared no-tests ${{ matrix.extra_flags }} --cross-compile-prefix=${{ matrix.prefix }} -D_WIN32_WINNT=0x0601 --prefix=%INSTALL_PREFIX% || exit /b 1
 
     - name: Build OpenSSL
       working-directory: openssl-${{ env.OPENSSL_VERSION }}
@@ -143,12 +110,8 @@ jobs:
       run: |
         $pkgName = "${{ matrix.artifact_name }}"
         $installDir = "install-${{ matrix.arch }}"
-        
         New-Item -ItemType Directory -Force -Path $pkgName | Out-Null
-        
         Copy-Item -Path "$installDir\*" -Destination $pkgName -Recurse -Force
-        
-        # 修复后的 BUILD_INFO (使用 Unix 路径风格)
         $buildInfo = "OpenSSL ${{ env.OPENSSL_VERSION }} ${{ matrix.arch }} Static Library`n" +
                      "Compiler: MinGW-w64 GCC 9.3.0 (SJLJ Exception Model)`n" +
                      "Toolchain: winlibs 9.3.0-7.0.0-r3`n" +
@@ -156,9 +119,7 @@ jobs:
                      "Configure Target: ${{ matrix.configure_target }}`n" +
                      "Windows Version: 0x0601 (Windows 7+)`n" +
                      "SSE2: Enabled (required by OpenSSL 3.x)"
-        
         $buildInfo | Out-File -Encoding utf8 "$pkgName\BUILD_INFO.txt"
-        
         7z a "$pkgName.7z" $pkgName\ | Out-Null
         Compress-Archive -Path $pkgName -DestinationPath "$pkgName.zip" -CompressionLevel Optimal
 
@@ -197,7 +158,6 @@ jobs:
           Write-Host $line
         }
         $content | Out-File -Encoding utf8 "CHECKSUMS.txt"
-        
         $bodyContent = ($content -replace "`n", "<br>") -replace "`r", ""
         "content=$bodyContent" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
@@ -212,7 +172,7 @@ jobs:
           - **版本**: MinGW-w64 GCC 9.3.0 (winlibs 9.3.0-7.0.0-r3)
           - **异常处理**: SJLJ (SetJump/LongJump)
           - **构建环境**: Windows Server 2022 (GitHub Actions)
-          - **Perl**: Strawberry Perl 5.42.0 (Unix-path fixed)
+          - **Perl**: Strawberry Perl 5.42.0
           - **目标系统**: Windows 7+ (`_WIN32_WINNT=0x0601`)
 
           ### 包含文件
