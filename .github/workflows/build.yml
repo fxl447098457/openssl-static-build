@@ -1,4 +1,4 @@
-name: Build OpenSSL 3.5.5 with MinGW GCC 9.3 SJLJ
+name: Build OpenSSL 3.5.5 Windows (GCC 9.3 SJLJ)
 
 on:
   push:
@@ -7,7 +7,6 @@ on:
     inputs:
       create_release:
         description: 'Create GitHub Release?'
-        required: true
         default: 'true'
         type: choice
         options: ['true', 'false']
@@ -16,164 +15,143 @@ env:
   OPENSSL_VERSION: 3.5.5
 
 jobs:
-  build-toolchain:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - arch: i686
-            mxe_target: i686-w64-mingw32.static
-          - arch: x86_64
-            mxe_target: x86_64-w64-mingw32.static
-    
-    name: Build GCC 9.3 SJLJ ${{ matrix.arch }}
-
-    steps:
-    - name: Install Dependencies (including mako)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          autoconf automake autopoint bash bison bzip2 flex g++ \
-          g++-multilib gettext git gperf intltool libc6-dev-i386 \
-          libgdk-pixbuf2.0-dev libltdl-dev libssl-dev libtool-bin \
-          libxml-parser-perl lzip make openssl p7zip-full patch \
-          perl pkg-config python3 python3-mako python3-setuptools \
-          python-is-python3 ruby sed unzip wget xz-utils
-
-    - name: Cache MXE Toolchain
-      id: cache-mxe
-      uses: actions/cache@v4
-      with:
-        path: ~/mxe/usr
-        key: mxe-gcc93-sjlj-${{ matrix.mxe_target }}-${{ runner.os }}-v2
-
-    - name: Clone MXE and Build GCC 9.3 with SJLJ
-      if: steps.cache-mxe.outputs.cache-hit != 'true'
-      run: |
-        git clone https://github.com/mxe/mxe.git ~/mxe
-        cd ~/mxe
-        
-        # 创建 settings.mk 启用 GCC 9 插件和 SJLJ
-        cat > settings.mk << 'EOF'
-        MXE_TARGETS := ${{ matrix.mxe_target }}
-        override MXE_PLUGIN_DIRS += plugins/gcc9
-        EOF
-        
-        # 修改 gcc9 插件启用 SJLJ
-        # 注意：需要修改 plugins/gcc9/gcc9.mk 添加 --enable-sjlj-exceptions
-        if [ -f plugins/gcc9/gcc9.mk ]; then
-          sed -i 's/--enable-languages/--enable-sjlj-exceptions --enable-languages/' plugins/gcc9/gcc9.mk || true
-        fi
-        
-        # 构建 GCC（这会使用 plugins/gcc9/ 下的 GCC 9.3）
-        make gcc -j$(nproc)
-      timeout-minutes: 180
-
-    - name: Verify Toolchain
-      run: |
-        export PATH=$HOME/mxe/usr/bin:$PATH
-        ${{ matrix.mxe_target }}-gcc --version
-        echo "Checking exception model..."
-        # 创建测试程序检查异常处理
-        cat > /tmp/test_exc.cpp << 'EOF'
-        #include <csetjmp>
-        jmp_buf buf;
-        int main() { if(!setjmp(buf)) longjmp(buf, 1); return 0; }
-        EOF
-        ${{ matrix.mxe_target }}-g++ /tmp/test_exc.cpp -o /tmp/test_exc.exe
-        echo "Build successful with SJLJ"
-
-    - name: Upload Toolchain
-      uses: actions/upload-artifact@v4
-      with:
-        name: toolchain-${{ matrix.mxe_target }}-gcc93
-        path: ~/mxe/usr/${{ matrix.mxe_target }}/
-        retention-days: 1
-
-  build-openssl:
-    needs: build-toolchain
-    runs-on: ubuntu-latest
+  build:
+    runs-on: windows-latest
     strategy:
       matrix:
         include:
           - arch: x86
-            mxe_target: i686-w64-mingw32.static
+            toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-i686-9.3.0-7.0.0-r3-sjlj.7z
+            mingw_dir: C:\mingw32
             configure_target: mingw
-            dest_dir: dist-legacy
-            extra_flags: no-sse2
+            prefix: i686-w64-mingw32-
             artifact_name: openssl-3.5.5-win32-static-gcc93-sjlj
-          - arch: x64
-            mxe_target: x86_64-w64-mingw32.static
-            configure_target: mingw64
-            dest_dir: dist64
             extra_flags: ""
+          - arch: x64
+            toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-x86_64-9.3.0-7.0.0-r3-sjlj.7z
+            mingw_dir: C:\mingw64
+            configure_target: mingw64
+            prefix: x86_64-w64-mingw32-
             artifact_name: openssl-3.5.5-win64-static-gcc93-sjlj
-    
-    name: Build OpenSSL ${{ matrix.arch }}
+            extra_flags: ""
+
+    name: Build ${{ matrix.arch }}
 
     steps:
-    - name: Download Toolchain
-      uses: actions/download-artifact@v4
-      with:
-        name: toolchain-${{ matrix.mxe_target }}-gcc93
-        path: ~/mxe/usr/${{ matrix.mxe_target }}
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-    - name: Setup Environment
+    - name: Install 7z and Strawberry Perl
+      shell: powershell
       run: |
-        echo "$HOME/mxe/usr/bin" >> $GITHUB_PATH
-        chmod +x ~/mxe/usr/bin/* 2>/dev/null || true
+        choco install 7zip strawberryperl -y
+        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+        refreshenv
 
-    - name: Install Dependencies
+    - name: Add Perl to PATH
+      shell: powershell
       run: |
-        sudo apt-get update
-        sudo apt-get install -y perl make
+        "C:\strawberry\perl\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+        "C:\strawberry\c\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-    - name: Download OpenSSL
+    - name: Verify Perl Installation
+      run: perl -v
+
+    - name: Download MinGW Toolchain
+      shell: powershell
       run: |
-        wget -O openssl.tar.gz https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+        Write-Host "Downloading ${{ matrix.arch }} toolchain..."
+        Invoke-WebRequest -Uri "${{ matrix.toolchain_url }}" -OutFile "toolchain.7z"
+
+    - name: Extract Toolchain
+      shell: powershell
+      run: |
+        7z x toolchain.7z -o"${{ matrix.mingw_dir }}" -y
+        if ("${{ matrix.arch }}" -eq "x86") {
+          $binDir = "${{ matrix.mingw_dir }}\mingw32\bin"
+        } else {
+          $binDir = "${{ matrix.mingw_dir }}\mingw64\bin"
+        }
+        $binDir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+        Write-Host "Added to PATH: $binDir"
+
+    - name: Verify Toolchain
+      shell: cmd
+      run: |
+        gcc --version
+        mingw32-make --version
+
+    - name: Download OpenSSL Source
+      shell: powershell
+      run: |
+        $url = "https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
+        Invoke-WebRequest -Uri $url -OutFile "openssl.tar.gz"
         tar -xzf openssl.tar.gz
-        mv openssl-${{ env.OPENSSL_VERSION }} openssl-src
+        dir "openssl-${{ env.OPENSSL_VERSION }}"
 
     - name: Configure OpenSSL
-      working-directory: openssl-src
-      env:
-        CC: ${{ matrix.mxe_target }}-gcc
-        AR: ${{ matrix.mxe_target }}-ar
-        RANLIB: ${{ matrix.mxe_target }}-ranlib
+      working-directory: openssl-${{ env.OPENSSL_VERSION }}
+      shell: cmd
       run: |
-        ./Configure ${{ matrix.configure_target }} \
-          no-apps no-async no-capieng no-deprecated no-docs \
-          no-dso no-module no-pinshared no-shared no-tests \
-          ${{ matrix.extra_flags }} \
-          --cross-compile-prefix=${{ matrix.mxe_target }}- \
-          -D_WIN32_WINNT=0x0501 \
-          --prefix=.
+        @echo on
+        set INSTALL_PREFIX=%CD%\..\install-${{ matrix.arch }}
+        
+        perl Configure ${{ matrix.configure_target }} ^
+          no-apps ^
+          no-async ^
+          no-capieng ^
+          no-deprecated ^
+          no-docs ^
+          no-dso ^
+          no-module ^
+          no-pinshared ^
+          no-shared ^
+          no-tests ^
+          ${{ matrix.extra_flags }} ^
+          --cross-compile-prefix=${{ matrix.prefix }} ^
+          -D_WIN32_WINNT=0x0600 ^
+          --prefix=%INSTALL_PREFIX% ^
+          || exit /b 1
 
     - name: Build OpenSSL
-      working-directory: openssl-src
-      run: make -j$(nproc)
-
-    - name: Install and Package
-      working-directory: openssl-src
+      working-directory: openssl-${{ env.OPENSSL_VERSION }}
+      shell: cmd
       run: |
-        make DESTDIR=../${{ matrix.dest_dir }}/ install_dev
+        @echo on
+        mingw32-make -j%NUMBER_OF_PROCESSORS% || exit /b 1
+
+    - name: Install OpenSSL
+      working-directory: openssl-${{ env.OPENSSL_VERSION }}
+      shell: cmd
+      run: |
+        @echo on
+        mingw32-make install_sw || exit /b 1
+
+    - name: Package Artifacts
+      shell: powershell
+      run: |
+        $pkgName = "${{ matrix.artifact_name }}"
+        $installDir = "install-${{ matrix.arch }}"
         
-        # 创建构建信息
-        mkdir -p ../${{ matrix.artifact_name }}
-        cp -r ../${{ matrix.dest_dir }}/* ../${{ matrix.artifact_name }}/
+        New-Item -ItemType Directory -Force -Path $pkgName | Out-Null
         
-        cat > ../${{ matrix.artifact_name }}/BUILD_INFO.txt << EOF
-        OpenSSL ${{ env.OPENSSL_VERSION }} Windows Static Library
-        Architecture: ${{ matrix.arch }}
-        Compiler: MinGW-w64 GCC 9.3.0 (SJLJ Exception Model)
-        Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-        Configure: ${{ matrix.configure_target }}
-        Win32 Version: 0x0501 (Windows XP+)
-        EOF
+        # 复制安装内容
+        Copy-Item -Path "$installDir\*" -Destination $pkgName -Recurse -Force
         
-        cd ..
-        zip -r ${{ matrix.artifact_name }}.zip ${{ matrix.artifact_name }}/
-        tar -czf ${{ matrix.artifact_name }}.tar.gz ${{ matrix.artifact_name }}/
+        # ✅ 修复: 使用标准字符串拼接 (避免 Here-String 语法)
+        $buildInfo = "OpenSSL ${{ env.OPENSSL_VERSION }} ${{ matrix.arch }} Static Library`n" +
+                     "Compiler: MinGW-w64 GCC 9.3.0 (SJLJ Exception Model)`n" +
+                     "Toolchain: winlibs 9.3.0-7.0.0-r3`n" +
+                     "Build Date: $(Get-Date -Format `"yyyy-MM-dd HH:mm:ss UTC`")`n" +
+                     "Configure Target: ${{ matrix.configure_target }}`n" +
+                     "Windows Version: 0x0600 (Vista+)`n" +
+                     "SSE2: Enabled (required by OpenSSL 3.x)"
+        
+        $buildInfo | Out-File -Encoding utf8 "$pkgName\BUILD_INFO.txt"
+        
+        # 打包
+        7z a "$pkgName.7z" $pkgName\ | Out-Null
+        Compress-Archive -Path $pkgName -DestinationPath "$pkgName.zip" -CompressionLevel Optimal
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
@@ -181,61 +159,69 @@ jobs:
         name: ${{ matrix.artifact_name }}
         path: |
           ${{ matrix.artifact_name }}.zip
-          ${{ matrix.artifact_name }}.tar.gz
+          ${{ matrix.artifact_name }}.7z
+        retention-days: 7
 
   release:
-    needs: build-openssl
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') || github.event.inputs.create_release == 'true'
-    
+    needs: build
+    runs-on: windows-latest
+    if: (startsWith(github.ref, 'refs/tags/') && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+
     steps:
     - name: Download All Artifacts
       uses: actions/download-artifact@v4
       with:
         path: ./artifacts
         pattern: openssl-3.5.5-*-gcc93-sjlj
+        merge-multiple: true
 
-    - name: Generate Release Notes
+    - name: Generate Checksums
+      id: checksums
+      shell: powershell
       run: |
-        cd artifacts
-        echo "## SHA256 Checksums" > ../RELEASE_BODY.md
-        echo "" >> ../RELEASE_BODY.md
-        find . -name "*.zip" -o -name "*.tar.gz" | sort | while read f; do
-          sha256sum "$f" >> ../RELEASE_BODY.md
-        done
-        cd ..
+        $files = Get-ChildItem -Path "./artifacts" -Recurse -Include "*.zip","*.7z"
+        $content = ""
+        foreach ($f in $files) {
+          $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash
+          $line = "$hash  $($f.Name)"
+          $content += "$line`n"
+          Write-Host $line
+        }
+        $content | Out-File -Encoding utf8 "CHECKSUMS.txt"
         
-        cat >> RELEASE_BODY.md << 'EOF'
-        
-        ## OpenSSL 3.5.5 Windows 静态库 (GCC 9.3 SJLJ)
-        
-        ### 编译器信息
-        - **版本**: MinGW-w64 GCC 9.3.0
-        - **异常处理**: SJLJ (SetJump/LongJump)
-        - **线程模型**: POSIX
-        - **目标系统**: Windows XP及以上
-        
-        ### SJLJ 特性说明
-        SJLJ 异常处理模型允许异常跨越 Windows 系统 DLL 和回调函数，与 Visual Studio 编译的 DLL 兼容性最佳。
-        
-        ### 包含文件
-        - `openssl-3.5.5-win32-static-gcc93-sjlj`: x86 32位静态库
-        - `openssl-3.5.5-win64-static-gcc93-sjlj`: x86_64 64位静态库
-        
-        ### 使用方法
-        解压后使用 `-I<path>/include -L<path>/lib` 链接静态库，需要额外链接 `ws2_32` 和 `crypt32`。
-        EOF
+        # 转义换行符供 GitHub Release 使用
+        $bodyContent = ($content -replace "`n", "<br>") -replace "`r", ""
+        "content=$bodyContent" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ github.ref_name || 'v3.5.5-sjlj' }}
         name: OpenSSL ${{ env.OPENSSL_VERSION }} Windows (GCC 9.3 SJLJ) ${{ github.ref_name }}
-        body_path: RELEASE_BODY.md
-        draft: false
-        prerelease: false
+        body: |
+          ## OpenSSL ${{ env.OPENSSL_VERSION }} Windows 静态库 (GCC 9.3 SJLJ)
+
+          ### 编译器信息
+          - **版本**: MinGW-w64 GCC 9.3.0 (winlibs 9.3.0-7.0.0-r3)
+          - **异常处理**: SJLJ (SetJump/LongJump)
+          - **构建环境**: Windows Server 2022 (GitHub Actions)
+          - **Perl**: Strawberry Perl 5.32+
+          - **目标系统**: Windows Vista+ (`_WIN32_WINNT=0x0600`)
+
+          ### 包含文件
+          - `openssl-3.5.5-win32-static-gcc93-sjlj`: x86 32位静态库 (**启用 SSE2**)
+          - `openssl-3.5.5-win64-static-gcc93-sjlj`: x86_64 64位静态库
+
+          ### 构建配置
+          - 静态链接 (`no-shared`)
+          - 禁用测试/文档 (`no-tests`, `no-docs`)
+          - 禁用动态加载 (`no-dso`, `no-module`)
+
+          ### SHA256 校验和
+          ${{ steps.checksums.outputs.content }}
+
         files: |
           artifacts/**/*.zip
-          artifacts/**/*.tar.gz
+          artifacts/**/*.7z
+          CHECKSUMS.txt
+        draft: false
+        prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') }}
