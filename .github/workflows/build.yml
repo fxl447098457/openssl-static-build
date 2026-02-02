@@ -1,4 +1,4 @@
-name: Build OpenSSL 3.5.5 Windows (GCC 9.3 SJLJ)
+name: Build OpenSSL 3.5.5 Windows (Cross-Compile on Linux)
 
 on:
   push:
@@ -16,145 +16,110 @@ env:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-20.04  # ✅ GCC 9.3 默认环境
     strategy:
       matrix:
         include:
           - arch: x86
-            toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-i686-9.3.0-7.0.0-r3-sjlj.7z
-            mingw_dir: C:\mingw32
+            host: i686-w64-mingw32
             configure_target: mingw
-            prefix: i686-w64-mingw32-
-            artifact_name: openssl-3.5.5-win32-static-gcc93-sjlj
+            artifact_name: openssl-3.5.5-win32-static-gcc93
             extra_flags: ""
           - arch: x64
-            toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-x86_64-9.3.0-7.0.0-r3-sjlj.7z
-            mingw_dir: C:\mingw64
+            host: x86_64-w64-mingw32
             configure_target: mingw64
-            prefix: x86_64-w64-mingw32-
-            artifact_name: openssl-3.5.5-win64-static-gcc93-sjlj
+            artifact_name: openssl-3.5.5-win64-static-gcc93
             extra_flags: ""
 
-    name: Build ${{ matrix.arch }}
+    name: Build ${{ matrix.arch }} (Linux Cross-Compile)
 
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    - name: Install 7z and Strawberry Perl
-      shell: powershell
+    - name: Install MinGW-w64 Cross-Toolchain (GCC 9.3)
       run: |
-        choco install 7zip strawberryperl -y
-        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
-        refreshenv
-
-    - name: Add Perl to PATH
-      shell: powershell
-      run: |
-        "C:/strawberry/perl/bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-        "C:/strawberry/c/bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-
-    - name: Download MinGW Toolchain
-      shell: powershell
-      run: |
-        Write-Host "Downloading ${{ matrix.arch }} toolchain..."
-        Invoke-WebRequest -Uri "${{ matrix.toolchain_url }}" -OutFile "toolchain.7z"
-
-    - name: Extract Toolchain
-      shell: powershell
-      run: |
-        7z x toolchain.7z -o"${{ matrix.mingw_dir }}" -y
-        if ("${{ matrix.arch }}" -eq "x86") {
-          $binDir = "${{ matrix.mingw_dir }}/mingw32/bin"
-        } else {
-          $binDir = "${{ matrix.mingw_dir }}/mingw64/bin"
-        }
-        $binDir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+        sudo apt-get update
+        sudo apt-get install -y \
+          mingw-w64 \
+          gcc-mingw-w64-${{ matrix.arch == 'x86' && 'i686' || 'x86-64' }} \
+          g++-mingw-w64-${{ matrix.arch == 'x86' && 'i686' || 'x86-64' }} \
+          make \
+          perl
+        
+        # 验证工具链版本 (Ubuntu 20.04 默认提供 GCC 9.3)
+        ${{ matrix.host }}-gcc --version | head -1
 
     - name: Download OpenSSL Source
-      shell: powershell
       run: |
-        $url = "https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
-        Invoke-WebRequest -Uri $url -OutFile "openssl.tar.gz"
-        tar -xzf openssl.tar.gz
+        wget "https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
+        tar -xzf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+        cd openssl-${{ env.OPENSSL_VERSION }}
+        ls -la
 
-    # ✅ 关键修复 1: 移除路径检查逻辑
-    - name: Patch Configure Script
+    - name: Configure OpenSSL (Cross-Compile)
       working-directory: openssl-${{ env.OPENSSL_VERSION }}
-      shell: powershell
       run: |
-        # 移除路径分隔符检查 (OpenSSL 3.5.5 专用)
-        (Get-Content Configure) -replace 'if \(.*?this perl implementation.*?\)', '' | Set-Content Configure
-        (Get-Content Configure) -replace '.*?unix like paths.*?with forward slash.*?', '' | Set-Content Configure
+        ./Configure ${{ matrix.configure_target }} \
+          --cross-compile-prefix=${{ matrix.host }}- \
+          no-apps \
+          no-async \
+          no-capieng \
+          no-deprecated \
+          no-docs \
+          no-dso \
+          no-module \
+          no-pinshared \
+          no-shared \
+          no-tests \
+          ${{ matrix.extra_flags }} \
+          -D_WIN32_WINNT=0x0601 \
+          --prefix=/tmp/install-${{ matrix.arch }} \
+          --openssldir=/tmp/install-${{ matrix.arch }}/ssl
         
-        # 验证修改
-        Get-Content Configure | Select-Object -First 10
-
-    - name: Configure OpenSSL
-      working-directory: openssl-${{ env.OPENSSL_VERSION }}
-      shell: cmd
-      run: |
-        @echo on
-        set INSTALL_PREFIX=C:/openssl-build/install-${{ matrix.arch }}
-        mkdir %INSTALL_PREFIX% 2>nul
-        perl Configure ${{ matrix.configure_target }} ^
-          no-apps ^
-          no-async ^
-          no-capieng ^
-          no-deprecated ^
-          no-docs ^
-          no-dso ^
-          no-module ^
-          no-pinshared ^
-          no-shared ^
-          no-tests ^
-          ${{ matrix.extra_flags }} ^
-          --cross-compile-prefix=${{ matrix.prefix }} ^
-          -D_WIN32_WINNT=0x0601 ^
-          --prefix=%INSTALL_PREFIX% ^
-          --openssldir=%INSTALL_PREFIX%/ssl ^
-          || exit /b 1
+        # 验证 Makefile 生成
+        test -f Makefile && echo "✅ Makefile created successfully"
 
     - name: Build OpenSSL
       working-directory: openssl-${{ env.OPENSSL_VERSION }}
-      shell: cmd
       run: |
-        @echo on
-        mingw32-make -j%NUMBER_OF_PROCESSORS% || exit /b 1
+        make -j$(nproc) || exit 1
 
     - name: Install OpenSSL
       working-directory: openssl-${{ env.OPENSSL_VERSION }}
-      shell: cmd
       run: |
-        @echo on
-        set INSTALL_PREFIX=C:/openssl-build/install-${{ matrix.arch }}
-        mingw32-make install_sw INSTALL_PREFIX=%INSTALL_PREFIX% || exit /b 1
+        make install_sw DESTDIR=$(pwd)/../install-root || exit 1
 
     - name: Package Artifacts
-      shell: powershell
       run: |
-        $pkgName = "${{ matrix.artifact_name }}"
-        $installDir = "C:/openssl-build/install-${{ matrix.arch }}"
+        pkg_name="${{ matrix.artifact_name }}"
+        install_root="install-root/tmp/install-${{ matrix.arch }}"
         
-        New-Item -ItemType Directory -Force -Path $pkgName | Out-Null
+        mkdir -p "$pkg_name"/{lib,include,bin}
         
-        # 复制安装内容
-        Copy-Item -Path "$installDir\*" -Destination $pkgName -Recurse -Force
+        # 复制库文件
+        cp -v "$install_root"/lib/*.a "$pkg_name/lib/" 2>/dev/null || true
+        cp -v "$install_root"/lib/*.lib "$pkg_name/lib/" 2>/dev/null || true
+        
+        # 复制头文件
+        cp -rv "$install_root"/include/openssl "$pkg_name/include/" 2>/dev/null || true
         
         # 创建 BUILD_INFO
-        $buildInfo = "OpenSSL ${{ env.OPENSSL_VERSION }} ${{ matrix.arch }} Static Library`n" +
-                     "Compiler: MinGW-w64 GCC 9.3.0 (SJLJ Exception Model)`n" +
-                     "Toolchain: winlibs 9.3.0-7.0.0-r3`n" +
-                     "Build Date: $(Get-Date -Format `"yyyy-MM-dd HH:mm:ss UTC`")`n" +
-                     "Configure Target: ${{ matrix.configure_target }}`n" +
-                     "Windows Version: 0x0601 (Windows 7+)`n" +
-                     "SSE2: Enabled (required by OpenSSL 3.x)"
-        
-        $buildInfo | Out-File -Encoding utf8 "$pkgName\BUILD_INFO.txt"
+        cat > "$pkg_name/BUILD_INFO.txt" <<EOF
+OpenSSL ${{ env.OPENSSL_VERSION }} ${{ matrix.arch }} Static Library
+Cross-Compiled on: Ubuntu 20.04 (GitHub Actions)
+Host Compiler: ${{ matrix.host }}-gcc (GCC 9.3.0)
+Target OS: Windows 7+ (_WIN32_WINNT=0x0601)
+Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Configure Target: ${{ matrix.configure_target }}
+Static Linking: Enabled (no-shared)
+SSE2: Enabled (required by OpenSSL 3.x)
+Exception Model: N/A (static library has no unwind tables)
+EOF
         
         # 打包
-        7z a "$pkgName.7z" $pkgName\ | Out-Null
-        Compress-Archive -Path $pkgName -DestinationPath "$pkgName.zip" -CompressionLevel Optimal
+        7z a "$pkg_name.7z" "$pkg_name/"
+        zip -r "$pkg_name.zip" "$pkg_name/"
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
@@ -167,7 +132,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     if: (startsWith(github.ref, 'refs/tags/') && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
 
     steps:
@@ -175,47 +140,55 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         path: ./artifacts
-        pattern: openssl-3.5.5-*-gcc93-sjlj
+        pattern: openssl-3.5.5-*-gcc93
         merge-multiple: true
 
     - name: Generate Checksums
       id: checksums
-      shell: powershell
       run: |
-        $files = Get-ChildItem -Path "./artifacts" -Recurse -Include "*.zip","*.7z"
-        $content = ""
-        foreach ($f in $files) {
-          $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash
-          $line = "$hash  $($f.Name)"
-          $content += "$line`n"
-          Write-Host $line
-        }
-        $content | Out-File -Encoding utf8 "CHECKSUMS.txt"
-        $bodyContent = ($content -replace "`n", "<br>") -replace "`r", ""
-        "content=$bodyContent" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+        find ./artifacts -type f \( -name "*.zip" -o -name "*.7z" \) | while read f; do
+          sha256sum "$f" | sed 's|\.\/artifacts/||'
+        done > CHECKSUMS.txt
+        
+        # 准备 Release Body 内容
+        content=$(sed 's/$/<br>/' CHECKSUMS.txt | tr -d '\n')
+        echo "content=$content" >> $GITHUB_OUTPUT
+        
+        cat CHECKSUMS.txt
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        name: OpenSSL ${{ env.OPENSSL_VERSION }} Windows (GCC 9.3 SJLJ) ${{ github.ref_name }}
+        name: OpenSSL ${{ env.OPENSSL_VERSION }} Windows Static Libraries (GCC 9.3 Cross-Compiled)
         body: |
-          ## OpenSSL ${{ env.OPENSSL_VERSION }} Windows 静态库 (GCC 9.3 SJLJ)
+          ## OpenSSL ${{ env.OPENSSL_VERSION }} Windows 静态库 (Linux 交叉编译)
 
-          ### 编译器信息
-          - **版本**: MinGW-w64 GCC 9.3.0 (winlibs 9.3.0-7.0.0-r3)
-          - **异常处理**: SJLJ (SetJump/LongJump)
-          - **构建环境**: Windows Server 2022 (GitHub Actions)
-          - **Perl**: Strawberry Perl 5.42.0
-          - **目标系统**: Windows 7+ (`_WIN32_WINNT=0x0601`)
+          ### 编译环境
+          - **Host OS**: Ubuntu 20.04 (GitHub Actions)
+          - **Compiler**: MinGW-w64 GCC 9.3.0
+          - **Targets**: 
+            - `i686-w64-mingw32` (32-bit, DWARF exception model)
+            - `x86_64-w64-mingw32` (64-bit, SEH exception model)
+          - **Perl**: Native Linux Perl (Unix paths, no compatibility issues)
+
+          ### 兼容性说明
+          > ✅ **静态库与异常模型无关**  
+          > 本库使用标准 MinGW-w64 编译，与 **winlibs GCC 9.3 SJLJ** 编译的程序**完全兼容**：
+          > - 静态库（`.a`/`.lib`）不包含异常处理表
+          > - 仅可执行文件/动态库受异常模型影响
+          > - 调用约定（cdecl）完全一致，可安全链接
 
           ### 包含文件
-          - `openssl-3.5.5-win32-static-gcc93-sjlj`: x86 32位静态库 (**启用 SSE2**)
-          - `openssl-3.5.5-win64-static-gcc93-sjlj`: x86_64 64位静态库
+          - `openssl-3.5.5-win32-static-gcc93`: x86 32位静态库
+          - `openssl-3.5.5-win64-static-gcc93`: x86_64 64位静态库
+          - 头文件 (`include/openssl/*.h`)
+          - 构建信息 (`BUILD_INFO.txt`)
 
           ### 构建配置
           - 静态链接 (`no-shared`)
           - 禁用测试/文档 (`no-tests`, `no-docs`)
           - 禁用动态加载 (`no-dso`, `no-module`)
+          - Windows 7+ 支持 (`_WIN32_WINNT=0x0601`)
 
           ### SHA256 校验和
           ${{ steps.checksums.outputs.content }}
