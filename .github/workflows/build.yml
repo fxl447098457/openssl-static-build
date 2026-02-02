@@ -54,9 +54,6 @@ jobs:
         "C:/strawberry/perl/bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
         "C:/strawberry/c/bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-    - name: Verify Perl
-      run: perl -v
-
     - name: Download MinGW Toolchain
       shell: powershell
       run: |
@@ -74,12 +71,6 @@ jobs:
         }
         $binDir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-    - name: Verify Toolchain
-      shell: cmd
-      run: |
-        gcc --version
-        mingw32-make --version
-
     - name: Download OpenSSL Source
       shell: powershell
       run: |
@@ -87,18 +78,25 @@ jobs:
         Invoke-WebRequest -Uri $url -OutFile "openssl.tar.gz"
         tar -xzf openssl.tar.gz
 
-    - name: Configure OpenSSL (CRITICAL FIX - Unix paths)
+    # ✅ 关键修复 1: 移除路径检查逻辑
+    - name: Patch Configure Script
+      working-directory: openssl-${{ env.OPENSSL_VERSION }}
+      shell: powershell
+      run: |
+        # 移除路径分隔符检查 (OpenSSL 3.5.5 专用)
+        (Get-Content Configure) -replace 'if \(.*?this perl implementation.*?\)', '' | Set-Content Configure
+        (Get-Content Configure) -replace '.*?unix like paths.*?with forward slash.*?', '' | Set-Content Configure
+        
+        # 验证修改
+        Get-Content Configure | Select-Object -First 10
+
+    - name: Configure OpenSSL
       working-directory: openssl-${{ env.OPENSSL_VERSION }}
       shell: cmd
       run: |
         @echo on
-        :: ✅ 关键修复: 使用正斜杠绝对路径 (C:/ 而非 C:\)
         set INSTALL_PREFIX=C:/openssl-build/install-${{ matrix.arch }}
-        
-        :: ✅ 创建目录避免 Configure 自动生成 (会用反斜杠)
         mkdir %INSTALL_PREFIX% 2>nul
-        
-        :: ✅ 显式指定 openssldir 避免内部路径转换
         perl Configure ${{ matrix.configure_target }} ^
           no-apps ^
           no-async ^
@@ -129,7 +127,8 @@ jobs:
       shell: cmd
       run: |
         @echo on
-        mingw32-make install_sw || exit /b 1
+        set INSTALL_PREFIX=C:/openssl-build/install-${{ matrix.arch }}
+        mingw32-make install_sw INSTALL_PREFIX=%INSTALL_PREFIX% || exit /b 1
 
     - name: Package Artifacts
       shell: powershell
@@ -139,9 +138,10 @@ jobs:
         
         New-Item -ItemType Directory -Force -Path $pkgName | Out-Null
         
-        # 复制安装内容 (使用 PowerShell 处理 Windows 路径)
-        Copy-Item -Path "$installDir\*" -Destination $pkgName -Recurse -Force -ErrorAction SilentlyContinue
+        # 复制安装内容
+        Copy-Item -Path "$installDir\*" -Destination $pkgName -Recurse -Force
         
+        # 创建 BUILD_INFO
         $buildInfo = "OpenSSL ${{ env.OPENSSL_VERSION }} ${{ matrix.arch }} Static Library`n" +
                      "Compiler: MinGW-w64 GCC 9.3.0 (SJLJ Exception Model)`n" +
                      "Toolchain: winlibs 9.3.0-7.0.0-r3`n" +
@@ -152,6 +152,7 @@ jobs:
         
         $buildInfo | Out-File -Encoding utf8 "$pkgName\BUILD_INFO.txt"
         
+        # 打包
         7z a "$pkgName.7z" $pkgName\ | Out-Null
         Compress-Archive -Path $pkgName -DestinationPath "$pkgName.zip" -CompressionLevel Optimal
 
