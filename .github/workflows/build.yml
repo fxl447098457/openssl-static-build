@@ -21,15 +21,15 @@ jobs:
       matrix:
         include:
           - arch: x86
+            msystem: MINGW32
             toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-i686-9.3.0-7.0.0-r3-sjlj.7z
-            mingw_dir: C:\mingw32
             configure_target: mingw
             prefix: i686-w64-mingw32-
             artifact_name: openssl-3.5.5-win32-static-gcc93-sjlj
             extra_flags: no-sse2
           - arch: x64
+            msystem: MINGW64
             toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-x86_64-9.3.0-7.0.0-r3-sjlj.7z
-            mingw_dir: C:\mingw64
             configure_target: mingw64
             prefix: x86_64-w64-mingw32-
             artifact_name: openssl-3.5.5-win64-static-gcc93-sjlj
@@ -38,113 +38,95 @@ jobs:
     name: Build ${{ matrix.arch }}
 
     steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
     - name: Install 7z
       run: choco install 7zip -y
 
-    - name: Install Strawberry Perl
+    - name: Download winlibs Toolchain
       run: |
-        choco install strawberryperl -y
-        refreshenv
-
-    - name: Add Perl to PATH
-      run: |
-        echo "C:\strawberry\perl\bin" >> $env:GITHUB_PATH
-        echo "C:\strawberry\c\bin" >> $env:GITHUB_PATH
-
-    - name: Verify Perl Installation
-      run: |
-        perl -v
-        perl -e "print 'Perl works!\n'"
-
-    - name: Download MinGW Toolchain
-      run: |
-        Write-Host "Downloading ${{ matrix.arch }} toolchain..."
         Invoke-WebRequest -Uri "${{ matrix.toolchain_url }}" -OutFile "toolchain.7z"
+        7z x toolchain.7z -o"C:\winlibs" -y
 
-    - name: Extract Toolchain
-      run: |
-        7z x toolchain.7z -o"${{ matrix.mingw_dir }}" -y
-        dir "${{ matrix.mingw_dir }}"
-
-    - name: Setup MinGW Environment
-      run: |
-        $mingwBin = "${{ matrix.mingw_dir }}\mingw32\bin"
-        if ("${{ matrix.arch }}" -eq "x64") {
-          $mingwBin = "${{ matrix.mingw_dir }}\mingw64\bin"
-        }
-        echo "$mingwBin" >> $env:GITHUB_PATH
-        echo "MINGW_BIN=$mingwBin" >> $env:GITHUB_ENV
-        & "$mingwBin\gcc.exe" --version
-
-    - name: Verify All Tools
-      run: |
-        Write-Host "=== Tool Versions ==="
-        perl -v | Select-Object -First 2
-        ${{ matrix.prefix }}gcc --version | Select-Object -First 1
-        Get-Command mingw32-make | Select-Object Source
-        mingw32-make --version | Select-Object -First 1
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: ${{ matrix.msystem }}
+        update: true
+        install: >-
+          base-devel
+          mingw-w64-${{ matrix.arch == 'x86' && 'i686' || 'x86_64' }}-toolchain
+          mingw-w64-${{ matrix.arch == 'x86' && 'i686' || 'x86_64' }}-perl
+          make
+          tar
 
     - name: Download OpenSSL Source
+      shell: msys2 {0}
       run: |
-        $url = "https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
-        Invoke-WebRequest -Uri $url -OutFile "openssl.tar.gz"
+        curl -L -o openssl.tar.gz "https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
         tar -xzf openssl.tar.gz
 
     - name: Configure OpenSSL
-      working-directory: openssl-${{ env.OPENSSL_VERSION }}
-      shell: cmd
+      shell: msys2 {0}
       run: |
-        set PATH=%MINGW_BIN%;C:\strawberry\perl\bin;C:\strawberry\c\bin;%PATH%
-        set CC=${{ matrix.prefix }}gcc
-        set AR=${{ matrix.prefix }}ar
-        set RANLIB=${{ matrix.prefix }}ranlib
+        cd openssl-${{ env.OPENSSL_VERSION }}
         
-        perl Configure ${{ matrix.configure_target }} ^
-          no-apps ^
-          no-async ^
-          no-capieng ^
-          no-deprecated ^
-          no-docs ^
-          no-dso ^
-          no-module ^
-          no-pinshared ^
-          no-shared ^
-          no-tests ^
-          ${{ matrix.extra_flags }} ^
-          --cross-compile-prefix=${{ matrix.prefix }} ^
-          -D_WIN32_WINNT=0x0501 ^
-          --prefix=C:/openssl-${{ matrix.arch }}
+        # 使用 winlibs 的 GCC 而不是 MSYS2 自带的
+        export CC="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}gcc"
+        export AR="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}ar"
+        export RANLIB="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}ranlib"
+        export WINDRES="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}windres"
         
-        if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+        # 添加到 PATH 最前面，确保优先使用 winlibs
+        export PATH="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin:$PATH"
+        
+        echo "Using GCC:"
+        ${{ matrix.prefix }}gcc --version
+        
+        perl Configure ${{ matrix.configure_target }} \
+          no-apps \
+          no-async \
+          no-capieng \
+          no-deprecated \
+          no-docs \
+          no-dso \
+          no-module \
+          no-pinshared \
+          no-shared \
+          no-tests \
+          ${{ matrix.extra_flags }} \
+          --cross-compile-prefix=${{ matrix.prefix }} \
+          -D_WIN32_WINNT=0x0501 \
+          --prefix=/openssl-${{ matrix.arch }}
 
     - name: Build OpenSSL
-      working-directory: openssl-${{ env.OPENSSL_VERSION }}
-      shell: cmd
+      shell: msys2 {0}
       run: |
-        set PATH=%MINGW_BIN%;C:\strawberry\perl\bin;%PATH%
-        mingw32-make -j%NUMBER_OF_PROCESSORS%
-        if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+        cd openssl-${{ env.OPENSSL_VERSION }}
+        export PATH="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin:$PATH"
+        make -j$(nproc)
 
     - name: Install OpenSSL
-      working-directory: openssl-${{ env.OPENSSL_VERSION }}
-      shell: cmd
+      shell: msys2 {0}
       run: |
-        set PATH=%MINGW_BIN%;C:\strawberry\perl\bin;%PATH%
-        mingw32-make install_sw DESTDIR=..
-        if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+        cd openssl-${{ env.OPENSSL_VERSION }}
+        export PATH="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin:$PATH"
+        make install_sw DESTDIR=/
 
     - name: Package Artifacts
       shell: pwsh
       run: |
         $pkgName = "${{ matrix.artifact_name }}"
-        New-Item -ItemType Directory -Force -Path $pkgName
+        $sourcePath = "C:\msys64\openssl-${{ matrix.arch }}"
         
-        $installDir = "openssl-${{ matrix.arch }}"
-        if (Test-Path "$installDir\usr\local") {
-          Copy-Item -Path "$installDir\usr\local\*" -Destination $pkgName -Recurse -Force
-        } elseif (Test-Path "$installDir") {
-          Copy-Item -Path "$installDir\*" -Destination $pkgName -Recurse -Force
+        # 如果 MSYS2 安装到不同路径，需要调整
+        if (-not (Test-Path $sourcePath)) {
+          $sourcePath = "openssl-${{ matrix.arch }}"
         }
+        
+        New-Item -ItemType Directory -Force -Path $pkgName
+        Copy-Item -Path "$sourcePath\*" -Destination $pkgName -Recurse -Force
         
         @"
         OpenSSL ${{ env.OPENSSL_VERSION }} ${{ matrix.arch }} Static Library
@@ -190,10 +172,7 @@ jobs:
         Out-File -Encoding utf8 $checksumFile
         
         $content = Get-Content $checksumFile -Raw
-        Write-Host "Checksums:"
-        Write-Host $content
         
-        # 设置多行输出
         echo "content<<EOF" >> $env:GITHUB_OUTPUT
         echo "$content" >> $env:GITHUB_OUTPUT
         echo "EOF" >> $env:GITHUB_OUTPUT
@@ -208,11 +187,10 @@ jobs:
           ### 编译器信息
           - **版本**: MinGW-w64 GCC 9.3.0 (winlibs 9.3.0-7.0.0-r3)
           - **异常处理**: SJLJ (SetJump/LongJump)
-          - **构建环境**: Windows Server 2022 (GitHub Actions)
-          - **Perl**: Strawberry Perl 5.32+
+          - **构建环境**: Windows Server 2022 + MSYS2
           
           ### 包含文件
-          - `openssl-3.5.5-win32-static-gcc93-sjlj`: x86 32位静态库（禁用 SSE2）
+          - `openssl-3.5.5-win32-static-gcc93-sjlj`: x86 32位静态库
           - `openssl-3.5.5-win64-static-gcc93-sjlj`: x86_64 64位静态库
           
           ### SHA256 校验和
