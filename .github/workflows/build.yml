@@ -22,6 +22,7 @@ jobs:
         include:
           - arch: x86
             msystem: MINGW32
+            mingw_arch: i686
             toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-i686-9.3.0-7.0.0-r3-sjlj.7z
             configure_target: mingw
             prefix: i686-w64-mingw32-
@@ -29,6 +30,7 @@ jobs:
             extra_flags: no-sse2
           - arch: x64
             msystem: MINGW64
+            mingw_arch: x86_64
             toolchain_url: https://github.com/brechtsanders/winlibs_mingw/releases/download/9.3.0-7.0.0-sjlj-r3/winlibs-mingw-w64-x86_64-9.3.0-7.0.0-r3-sjlj.7z
             configure_target: mingw64
             prefix: x86_64-w64-mingw32-
@@ -38,9 +40,6 @@ jobs:
     name: Build ${{ matrix.arch }}
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
     - name: Install 7z
       run: choco install 7zip -y
 
@@ -56,8 +55,8 @@ jobs:
         update: true
         install: >-
           base-devel
-          mingw-w64-${{ matrix.arch == 'x86' && 'i686' || 'x86_64' }}-toolchain
-          mingw-w64-${{ matrix.arch == 'x86' && 'i686' || 'x86_64' }}-perl
+          mingw-w64-${{ matrix.mingw_arch }}-toolchain
+          perl
           make
           tar
 
@@ -72,16 +71,15 @@ jobs:
       run: |
         cd openssl-${{ env.OPENSSL_VERSION }}
         
-        # 使用 winlibs 的 GCC 而不是 MSYS2 自带的
-        export CC="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}gcc"
-        export AR="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}ar"
-        export RANLIB="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}ranlib"
-        export WINDRES="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}windres"
+        # 使用 winlibs 的 GCC 9.3 SJLJ
+        export CC="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}gcc"
+        export AR="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}ar"
+        export RANLIB="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}ranlib"
         
-        # 添加到 PATH 最前面，确保优先使用 winlibs
-        export PATH="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin:$PATH"
+        # 优先使用 winlibs
+        export PATH="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin:$PATH"
         
-        echo "Using GCC:"
+        echo "GCC Version:"
         ${{ matrix.prefix }}gcc --version
         
         perl Configure ${{ matrix.configure_target }} \
@@ -104,14 +102,14 @@ jobs:
       shell: msys2 {0}
       run: |
         cd openssl-${{ env.OPENSSL_VERSION }}
-        export PATH="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin:$PATH"
+        export PATH="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin:$PATH"
         make -j$(nproc)
 
     - name: Install OpenSSL
       shell: msys2 {0}
       run: |
         cd openssl-${{ env.OPENSSL_VERSION }}
-        export PATH="/c/winlibs/${{ matrix.arch == 'x86' && 'mingw32' || 'mingw64' }}/bin:$PATH"
+        export PATH="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin:$PATH"
         make install_sw DESTDIR=/
 
     - name: Package Artifacts
@@ -120,13 +118,16 @@ jobs:
         $pkgName = "${{ matrix.artifact_name }}"
         $sourcePath = "C:\msys64\openssl-${{ matrix.arch }}"
         
-        # 如果 MSYS2 安装到不同路径，需要调整
+        if (-not (Test-Path $sourcePath)) {
+          # 尝试其他可能路径
+          $sourcePath = "${{ matrix.msystem == 'MINGW32' && 'C:\msys64\mingw32' || 'C:\msys64\mingw64' }}\openssl-${{ matrix.arch }}"
+        }
         if (-not (Test-Path $sourcePath)) {
           $sourcePath = "openssl-${{ matrix.arch }}"
         }
         
         New-Item -ItemType Directory -Force -Path $pkgName
-        Copy-Item -Path "$sourcePath\*" -Destination $pkgName -Recurse -Force
+        Copy-Item -Path "$sourcePath\*" -Destination $pkgName -Recurse -Force -ErrorAction SilentlyContinue
         
         @"
         OpenSSL ${{ env.OPENSSL_VERSION }} ${{ matrix.arch }} Static Library
