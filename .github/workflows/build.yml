@@ -71,17 +71,19 @@ jobs:
       run: |
         cd openssl-${{ env.OPENSSL_VERSION }}
         
-        # 使用 winlibs 的 GCC 9.3 SJLJ
+        # 关键修复：只设置 CC/AR/RANLIB 为完整路径，不使用 --cross-compile-prefix
         export CC="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}gcc"
         export AR="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}ar"
         export RANLIB="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}ranlib"
+        export WINDRES="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin/${{ matrix.prefix }}windres"
         
-        # 优先使用 winlibs
+        # 确保 winlibs 在 PATH 最前面
         export PATH="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin:$PATH"
         
-        echo "GCC Version:"
-        ${{ matrix.prefix }}gcc --version
+        echo "CC: $CC"
+        $CC --version
         
+        # 注意：移除了 --cross-compile-prefix，只依靠 CC 环境变量
         perl Configure ${{ matrix.configure_target }} \
           no-apps \
           no-async \
@@ -94,7 +96,6 @@ jobs:
           no-shared \
           no-tests \
           ${{ matrix.extra_flags }} \
-          --cross-compile-prefix=${{ matrix.prefix }} \
           -D_WIN32_WINNT=0x0501 \
           --prefix=/openssl-${{ matrix.arch }}
 
@@ -102,14 +103,12 @@ jobs:
       shell: msys2 {0}
       run: |
         cd openssl-${{ env.OPENSSL_VERSION }}
-        export PATH="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin:$PATH"
         make -j$(nproc)
 
     - name: Install OpenSSL
       shell: msys2 {0}
       run: |
         cd openssl-${{ env.OPENSSL_VERSION }}
-        export PATH="/c/winlibs/${{ matrix.msystem == 'MINGW32' && 'mingw32' || 'mingw64' }}/bin:$PATH"
         make install_sw DESTDIR=/
 
     - name: Package Artifacts
@@ -119,11 +118,7 @@ jobs:
         $sourcePath = "C:\msys64\openssl-${{ matrix.arch }}"
         
         if (-not (Test-Path $sourcePath)) {
-          # 尝试其他可能路径
-          $sourcePath = "${{ matrix.msystem == 'MINGW32' && 'C:\msys64\mingw32' || 'C:\msys64\mingw64' }}\openssl-${{ matrix.arch }}"
-        }
-        if (-not (Test-Path $sourcePath)) {
-          $sourcePath = "openssl-${{ matrix.arch }}"
+          $sourcePath = "/openssl-${{ matrix.arch }}" | ForEach-Object { $_ -replace '^/(\w)/', '$1:\' -replace '/', '\' }
         }
         
         New-Item -ItemType Directory -Force -Path $pkgName
